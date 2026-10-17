@@ -1,0 +1,391 @@
+-- ControllerDot: pas het controller-vizier (GamepadReticle) aan of zet het helemaal uit.
+-- Alleen GamepadReticle wordt aangeraakt (niet breed zoeken op "reticle": dat geeft lag).
+-- Altijd SetAlpha i.p.v. Hide(), zodat het ook in gevechten werkt.
+
+local ADDON = "ControllerDot"
+
+local defaults = {
+	hidden = false,   -- hele vizier uit
+	alpha = 1,        -- transparantie van de stip (0-1)
+	r = 1, g = 1, b = 1,
+	shape = "default",
+	size = 3,         -- pixels
+	thickness = 1,    -- lijndikte voor plus/kruis
+	swing = true,     -- swing-ring rond de stip tonen
+}
+
+local SHAPES = { "default", "square", "circle", "plus", "cross" }
+local SHAPE_NAMES = {
+	default = "Standaard",
+	square = "Vierkant",
+	circle = "Rond",
+	plus = "Plus (+)",
+	cross = "Kruis (x)",
+}
+local CIRCLE_TEX = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+
+local db
+local overlay, tex, bar1, bar2
+local hooked = false
+local origIconW, origIconH
+local busy = false -- voorkomt recursie in de hooks
+local weHidReticle, weHidSwing = false, false
+
+local function Print(msg)
+	print("|cff33ff99ControllerDot|r: " .. msg)
+end
+
+---------------------------------------------------------------------------
+-- Toepassen
+---------------------------------------------------------------------------
+
+local function IconAlpha()
+	if db.shape ~= "default" then return 0 end
+	return db.alpha
+end
+
+local function BuildOverlay(reticle)
+	overlay = CreateFrame("Frame", nil, reticle)
+	overlay:SetPoint("CENTER")
+	overlay:SetSize(1, 1)
+	overlay:SetFrameLevel(reticle:GetFrameLevel() + 5)
+
+	tex = overlay:CreateTexture(nil, "OVERLAY")
+	tex:SetPoint("CENTER")
+	bar1 = overlay:CreateTexture(nil, "OVERLAY")
+	bar1:SetPoint("CENTER")
+	bar2 = overlay:CreateTexture(nil, "OVERLAY")
+	bar2:SetPoint("CENTER")
+end
+
+local function ApplyOverlay()
+	local s, t = db.size, db.thickness
+	local shape = db.shape
+
+	tex:Hide(); bar1:Hide(); bar2:Hide()
+	if shape == "default" then
+		overlay:Hide()
+		return
+	end
+	overlay:Show()
+	overlay:SetAlpha(db.alpha)
+
+	if shape == "square" or shape == "circle" then
+		if shape == "square" then
+			tex:SetColorTexture(1, 1, 1, 1)
+		else
+			tex:SetTexture(CIRCLE_TEX)
+		end
+		tex:SetVertexColor(db.r, db.g, db.b)
+		tex:SetSize(s, s)
+		tex:Show()
+	else
+		local rot = (shape == "cross") and math.rad(45) or 0
+		for i, bar in ipairs({ bar1, bar2 }) do
+			bar:SetColorTexture(db.r, db.g, db.b, 1)
+			if i == 1 then bar:SetSize(s, t) else bar:SetSize(t, s) end
+			bar:SetRotation(rot)
+			bar:Show()
+		end
+	end
+end
+
+local function Apply()
+	local reticle = GamepadReticle
+	if not reticle or not db then return end
+	local icon = reticle.Icons and reticle.Icons.StandardIcon
+	local swing = reticle.SwingTimer
+
+	if not hooked then
+		hooked = true
+		hooksecurefunc(reticle, "SetAlpha", function(self, a)
+			if busy or not db.hidden then return end
+			if a and a > 0 then
+				busy = true; self:SetAlpha(0); busy = false
+			end
+		end)
+		if icon then
+			origIconW, origIconH = icon:GetSize()
+			hooksecurefunc(icon, "SetAlpha", function(self, a)
+				if busy then return end
+				local want = IconAlpha()
+				if a and math.abs(a - want) > 0.01 then
+					busy = true; self:SetAlpha(want); busy = false
+				end
+			end)
+			hooksecurefunc(icon, "SetVertexColor", function(self, r, g, b)
+				if busy then return end
+				busy = true; self:SetVertexColor(db.r, db.g, db.b); busy = false
+			end)
+		end
+		if swing then
+			hooksecurefunc(swing, "SetAlpha", function(self, a)
+				if busy or db.swing then return end
+				if a and a > 0 then
+					busy = true; self:SetAlpha(0); busy = false
+				end
+			end)
+		end
+		BuildOverlay(reticle)
+	end
+
+	busy = true
+	-- alleen terugzetten wat we zelf verborgen hebben; verder bepaalt de game de zichtbaarheid
+	if db.hidden then
+		reticle:SetAlpha(0); weHidReticle = true
+	elseif weHidReticle then
+		reticle:SetAlpha(1); weHidReticle = false
+	end
+	if icon then
+		icon:SetAlpha(IconAlpha())
+		icon:SetVertexColor(db.r, db.g, db.b)
+		if db.shape == "default" then
+			icon:SetSize(db.size, db.size)
+		elseif origIconW then
+			icon:SetSize(origIconW, origIconH)
+		end
+	end
+	if swing then
+		if not db.swing then
+			swing:SetAlpha(0); weHidSwing = true
+		elseif weHidSwing then
+			swing:SetAlpha(1); weHidSwing = false
+		end
+	end
+	busy = false
+
+	ApplyOverlay()
+end
+
+---------------------------------------------------------------------------
+-- Instellingenvenster
+---------------------------------------------------------------------------
+
+local panel
+local widgets = {}
+
+local function MakeSlider(parent, label, minV, maxV, step, key, fmt, y)
+	local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+	fs:SetPoint("TOPLEFT", 16, y)
+
+	local s = CreateFrame("Slider", nil, parent)
+	s:SetOrientation("HORIZONTAL")
+	s:SetPoint("TOPLEFT", 16, y - 16)
+	s:SetSize(228, 16)
+	s:SetMinMaxValues(minV, maxV)
+	s:SetValueStep(step)
+	if s.SetObeyStepOnDrag then s:SetObeyStepOnDrag(true) end
+	s:EnableMouseWheel(true)
+
+	local bg = s:CreateTexture(nil, "BACKGROUND")
+	bg:SetPoint("LEFT"); bg:SetPoint("RIGHT")
+	bg:SetHeight(6)
+	bg:SetColorTexture(0.2, 0.2, 0.2, 1)
+	s:SetThumbTexture("Interface\\Buttons\\UI-SliderBar-Button-Horizontal")
+
+	local function UpdateLabel(v)
+		fs:SetText(label .. ": " .. string.format(fmt, v))
+	end
+	s:SetScript("OnValueChanged", function(self, v)
+		v = math.floor(v / step + 0.5) * step
+		db[key] = v
+		UpdateLabel(v)
+		Apply()
+	end)
+	s:SetScript("OnMouseWheel", function(self, d)
+		self:SetValue(self:GetValue() + d * step)
+	end)
+	s.Refresh = function(self)
+		self:SetValue(db[key])
+		UpdateLabel(db[key])
+	end
+	return s
+end
+
+local function MakeCheck(parent, label, key, y)
+	local c = CreateFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+	c:SetPoint("TOPLEFT", 12, y)
+	local fs = c.Text or c.text or c:CreateFontString(nil, "ARTWORK", "GameFontHighlight")
+	fs:ClearAllPoints()
+	fs:SetPoint("LEFT", c, "RIGHT", 2, 0)
+	fs:SetText(label)
+	c:SetScript("OnClick", function(self)
+		db[key] = self:GetChecked() and true or false
+		Apply()
+	end)
+	c.Refresh = function(self) self:SetChecked(db[key]) end
+	return c
+end
+
+local function OpenColorPicker()
+	local oldR, oldG, oldB = db.r, db.g, db.b
+	local function OnChange()
+		db.r, db.g, db.b = ColorPickerFrame:GetColorRGB()
+		widgets.swatch:Refresh()
+		Apply()
+	end
+	local function OnCancel()
+		db.r, db.g, db.b = oldR, oldG, oldB
+		widgets.swatch:Refresh()
+		Apply()
+	end
+	if ColorPickerFrame.SetupColorPickerAndShow then
+		ColorPickerFrame:SetupColorPickerAndShow({
+			r = oldR, g = oldG, b = oldB,
+			hasOpacity = false,
+			swatchFunc = OnChange,
+			cancelFunc = OnCancel,
+		})
+	else
+		ColorPickerFrame.hasOpacity = false
+		ColorPickerFrame.func = OnChange
+		ColorPickerFrame.cancelFunc = OnCancel
+		ColorPickerFrame.previousValues = { oldR, oldG, oldB }
+		ColorPickerFrame:SetColorRGB(oldR, oldG, oldB)
+		ColorPickerFrame:Hide()
+		ColorPickerFrame:Show()
+	end
+end
+
+local function RefreshPanel()
+	for _, w in pairs(widgets) do w:Refresh() end
+end
+
+local function BuildPanel()
+	panel = CreateFrame("Frame", "ControllerDotFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
+	panel:SetSize(260, 340)
+	panel:SetPoint("CENTER")
+	panel:SetFrameStrata("DIALOG")
+	panel:SetMovable(true)
+	panel:EnableMouse(true)
+	panel:RegisterForDrag("LeftButton")
+	panel:SetScript("OnDragStart", panel.StartMoving)
+	panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
+	panel:SetClampedToScreen(true)
+	if panel.SetBackdrop then
+		panel:SetBackdrop({
+			bgFile = "Interface\\Buttons\\WHITE8X8",
+			edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+			edgeSize = 14,
+			insets = { left = 3, right = 3, top = 3, bottom = 3 },
+		})
+		panel:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
+	end
+	tinsert(UISpecialFrames, "ControllerDotFrame") -- sluiten met Escape
+
+	local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+	title:SetPoint("TOP", 0, -12)
+	title:SetText("Controller Dot Customizer")
+
+	local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
+	close:SetPoint("TOPRIGHT", -2, -2)
+
+	widgets.hidden = MakeCheck(panel, "Vizier helemaal uit", "hidden", -38)
+	widgets.swing = MakeCheck(panel, "Swing-ring tonen", "swing", -64)
+
+	-- vorm
+	local shapeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+	shapeLabel:SetPoint("TOPLEFT", 16, -100)
+	shapeLabel:SetText("Vorm")
+	local shapeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+	shapeBtn:SetPoint("TOPLEFT", 14, -114)
+	shapeBtn:SetSize(130, 22)
+	shapeBtn:SetScript("OnClick", function(self, button)
+		local idx = 1
+		for i, s in ipairs(SHAPES) do if s == db.shape then idx = i end end
+		idx = (idx % #SHAPES) + 1
+		db.shape = SHAPES[idx]
+		self:Refresh()
+		Apply()
+	end)
+	shapeBtn.Refresh = function(self) self:SetText(SHAPE_NAMES[db.shape] or db.shape) end
+	widgets.shape = shapeBtn
+
+	-- kleur
+	local swatch = CreateFrame("Button", nil, panel)
+	swatch:SetPoint("LEFT", shapeBtn, "RIGHT", 12, 0)
+	swatch:SetSize(22, 22)
+	local border = swatch:CreateTexture(nil, "BACKGROUND")
+	border:SetAllPoints()
+	border:SetColorTexture(0.6, 0.6, 0.6, 1)
+	local fill = swatch:CreateTexture(nil, "ARTWORK")
+	fill:SetPoint("TOPLEFT", 2, -2)
+	fill:SetPoint("BOTTOMRIGHT", -2, 2)
+	local swLabel = swatch:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	swLabel:SetPoint("LEFT", swatch, "RIGHT", 6, 0)
+	swLabel:SetText("Kleur")
+	swatch:SetScript("OnClick", OpenColorPicker)
+	swatch.Refresh = function() fill:SetColorTexture(db.r, db.g, db.b, 1) end
+	widgets.swatch = swatch
+
+	widgets.alpha = MakeSlider(panel, "Transparantie", 0, 1, 0.05, "alpha", "%.2f", -150)
+	widgets.size = MakeSlider(panel, "Grootte", 1, 40, 1, "size", "%d px", -192)
+	widgets.thickness = MakeSlider(panel, "Lijndikte (plus/kruis)", 1, 8, 1, "thickness", "%d px", -234)
+
+	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+	reset:SetPoint("BOTTOM", 0, 14)
+	reset:SetSize(120, 22)
+	reset:SetText("Standaard")
+	reset:SetScript("OnClick", function()
+		for k, v in pairs(defaults) do db[k] = v end
+		RefreshPanel()
+		Apply()
+	end)
+
+	panel:SetScript("OnShow", RefreshPanel)
+	panel:Hide()
+end
+
+local function TogglePanel()
+	if not panel then BuildPanel() end
+	panel:SetShown(not panel:IsShown())
+end
+
+---------------------------------------------------------------------------
+-- Slash-commando's
+---------------------------------------------------------------------------
+
+SLASH_CONTROLLERDOT1 = "/dot"
+SLASH_CONTROLLERDOT2 = "/controllerdot"
+SlashCmdList.CONTROLLERDOT = function(msg)
+	msg = (msg or ""):lower():match("^%s*(.-)%s*$")
+	if msg == "off" or msg == "uit" then
+		db.hidden = true
+	elseif msg == "on" or msg == "aan" then
+		db.hidden = false
+	elseif msg == "toggle" then
+		db.hidden = not db.hidden
+	elseif msg == "reset" then
+		for k, v in pairs(defaults) do db[k] = v end
+	else
+		TogglePanel()
+		return
+	end
+	Apply()
+	if panel and panel:IsShown() then RefreshPanel() end
+	Print(db.hidden and "vizier uit." or "vizier aan.")
+end
+
+---------------------------------------------------------------------------
+-- Events
+---------------------------------------------------------------------------
+
+local f = CreateFrame("Frame")
+f:RegisterEvent("ADDON_LOADED")
+f:RegisterEvent("PLAYER_ENTERING_WORLD")
+pcall(f.RegisterEvent, f, "GAME_PAD_ACTIVE_CHANGED")
+f:SetScript("OnEvent", function(self, event, arg1)
+	if event == "ADDON_LOADED" then
+		if arg1 == ADDON then
+			ControllerDotDB = ControllerDotDB or {}
+			db = ControllerDotDB
+			for k, v in pairs(defaults) do
+				if db[k] == nil then db[k] = v end
+			end
+		end
+		return
+	end
+	Apply()
+	-- voor het geval het vizier iets later wordt aangemaakt
+	C_Timer.After(2, Apply)
+end)

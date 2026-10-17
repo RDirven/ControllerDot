@@ -1,0 +1,8 @@
+## Interface: 16001, 11507, 11506, 11505, 11504, 120000
+## Title: Controller Dot Customizer
+## Notes: Pas het controller-vizier (GamepadReticle) aan: vorm, kleur, grootte, transparantie of helemaal uit. /dot
+## Author: Robert-Jan
+## Version: @project-version@
+## SavedVariables: ControllerDotDB
+
+ControllerDot.lua

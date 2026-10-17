@@ -1,0 +1,5 @@
+package-as: ControllerDot
+
+ignore:
+  - README.md
+  - .github
