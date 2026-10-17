@@ -11,7 +11,6 @@ This addon lets you style it your way, or turn it off completely.
 - Shape: default, square, circle, plus (+), cross (x)
 - Color picker
 - Transparency, size and line thickness sliders
-- Show or hide the swing timer ring around the dot
 - Works in combat (uses `SetAlpha`, never `Hide()`)
 
 ## Usage

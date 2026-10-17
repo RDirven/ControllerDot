@@ -11,7 +11,6 @@ local defaults = {
 	shape = "default",
 	size = 3,         -- pixels
 	thickness = 1,    -- line thickness for plus/cross
-	swing = true,     -- show the swing timer ring around the dot
 }
 
 local SHAPES = { "default", "square", "circle", "plus", "cross" }
@@ -32,7 +31,7 @@ local overlay, tex, bar1, bar2
 local hooked = false
 local origIconW, origIconH
 local busy = false -- prevents recursion in the hooks
-local weHidReticle, weHidSwing = false, false
+local weHidReticle = false
 
 local function Print(msg)
 	print("|cff33ff99ControllerDot|r: " .. msg)
@@ -112,7 +111,6 @@ local function Apply()
 	local reticle = GamepadReticle
 	if not reticle or not db then return end
 	local icon = reticle.Icons and reticle.Icons.StandardIcon
-	local swing = reticle.SwingTimer
 
 	if not hooked then
 		hooked = true
@@ -136,14 +134,6 @@ local function Apply()
 				busy = true; self:SetVertexColor(db.r, db.g, db.b); busy = false
 			end)
 		end
-		if swing then
-			hooksecurefunc(swing, "SetAlpha", function(self, a)
-				if busy or db.swing then return end
-				if a and a > 0 then
-					busy = true; self:SetAlpha(0); busy = false
-				end
-			end)
-		end
 		BuildOverlay(reticle)
 	end
 
@@ -161,13 +151,6 @@ local function Apply()
 			icon:SetSize(db.size, db.size)
 		elseif origIconW then
 			icon:SetSize(origIconW, origIconH)
-		end
-	end
-	if swing then
-		if not db.swing then
-			swing:SetAlpha(0); weHidSwing = true
-		elseif weHidSwing then
-			swing:SetAlpha(1); weHidSwing = false
 		end
 	end
 	busy = false
@@ -271,7 +254,7 @@ end
 
 local function BuildPanel()
 	panel = CreateFrame("Frame", "ControllerDotFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-	panel:SetSize(280, 370)
+	panel:SetSize(280, 344)
 	panel:SetPoint("CENTER")
 	panel:SetFrameStrata("DIALOG")
 	panel:SetMovable(true)
@@ -299,14 +282,13 @@ local function BuildPanel()
 	close:SetPoint("TOPRIGHT", -2, -2)
 
 	widgets.hidden = MakeCheck(panel, "Turn reticle off", "hidden", -38)
-	widgets.swing = MakeCheck(panel, "Show swing timer ring", "swing", -64)
 
 	-- shape
 	local shapeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-	shapeLabel:SetPoint("TOPLEFT", 16, -100)
+	shapeLabel:SetPoint("TOPLEFT", 16, -74)
 	shapeLabel:SetText("Shape")
 	local shapeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	shapeBtn:SetPoint("TOPLEFT", 14, -114)
+	shapeBtn:SetPoint("TOPLEFT", 14, -88)
 	shapeBtn:SetSize(130, 22)
 	shapeBtn:SetScript("OnClick", function(self)
 		local idx = 1
@@ -336,13 +318,13 @@ local function BuildPanel()
 	swatch.Refresh = function() fill:SetColorTexture(db.r, db.g, db.b, 1) end
 	widgets.swatch = swatch
 
-	widgets.alpha = MakeSlider(panel, "Opacity", 0, 1, 0.05, "alpha", "%.2f", -150)
-	widgets.size = MakeSlider(panel, "Size", 1, 40, 1, "size", "%d px", -192)
-	widgets.thickness = MakeSlider(panel, "Line thickness (plus/cross)", 1, 8, 1, "thickness", "%d px", -234)
+	widgets.alpha = MakeSlider(panel, "Opacity", 0, 1, 0.05, "alpha", "%.2f", -124)
+	widgets.size = MakeSlider(panel, "Size", 1, 40, 1, "size", "%d px", -166)
+	widgets.thickness = MakeSlider(panel, "Line thickness (plus/cross)", 1, 8, 1, "thickness", "%d px", -208)
 
 	-- warning when another addon also hides the reticle
 	local warn = panel:CreateFontString(nil, "ARTWORK", "GameFontRedSmall")
-	warn:SetPoint("TOPLEFT", 16, -276)
+	warn:SetPoint("TOPLEFT", 16, -250)
 	warn:SetPoint("RIGHT", -16, 0)
 	warn:SetJustifyH("LEFT")
 	warn.Refresh = function(self)
@@ -380,24 +362,45 @@ end
 ---------------------------------------------------------------------------
 
 local function Debug()
+	local log = { date("%Y-%m-%d %H:%M:%S") .. (InCombatLockdown() and " (in combat)" or " (not in combat)") }
+	local function P(s) Print(s); log[#log + 1] = s end
 	local r = GamepadReticle
-	Print("GamepadReticle: " .. (r and "found" or "NOT found"))
+	P("GamepadReticle: " .. (r and "found" or "NOT found"))
 	if r then
-		Print(string.format("  shown=%s visible=%s alpha=%.2f hooked=%s",
+		P(string.format("  shown=%s visible=%s alpha=%.2f hooked=%s",
 			tostring(r:IsShown()), tostring(r:IsVisible()), r:GetAlpha(), tostring(hooked)))
 		local icon = r.Icons and r.Icons.StandardIcon
 		if icon then
 			local w, h = icon:GetSize()
-			Print(string.format("  StandardIcon: alpha=%.2f size=%.0fx%.0f", icon:GetAlpha(), w, h))
+			P(string.format("  StandardIcon: alpha=%.2f size=%.0fx%.0f", icon:GetAlpha(), w, h))
 		else
-			Print("  StandardIcon: NOT found")
+			P("  StandardIcon: NOT found")
 		end
-		Print("  SwingTimer: " .. (r.SwingTimer and "found" or "NOT found"))
+		P("  SwingTimer: " .. (r.SwingTimer and "found" or "NOT found"))
+		P("  parts (key, type, visible, alpha):")
+		local function Dump(obj, path, depth)
+			if depth > 3 then return end
+			for k, v in pairs(obj) do
+				if type(k) == "string" and type(v) == "table" and v ~= obj
+					and type(v.GetObjectType) == "function" and v ~= overlay then
+					local ok, objType = pcall(v.GetObjectType, v)
+					if ok then
+						local vis = v.IsVisible and v:IsVisible()
+						local a = v.GetAlpha and v:GetAlpha() or 1
+						P(string.format("    %s.%s  %s  %s  %.2f", path, k, objType, tostring(vis), a))
+						Dump(v, path .. "." .. k, depth + 1)
+					end
+				end
+			end
+		end
+		Dump(r, "R", 1)
 	end
-	Print(string.format("  settings: hidden=%s shape=%s alpha=%.2f size=%d",
+	P(string.format("  settings: hidden=%s shape=%s alpha=%.2f size=%d",
 		tostring(db.hidden), db.shape, db.alpha, db.size))
 	local found = LoadedConflicts()
-	Print("  conflicting addons: " .. (#found > 0 and table.concat(found, ", ") or "none"))
+	P("  conflicting addons: " .. (#found > 0 and table.concat(found, ", ") or "none"))
+	db.lastDebug = log
+	Print("saved to ControllerDotDB.lastDebug (do /reload to write it to disk)")
 end
 
 ---------------------------------------------------------------------------
