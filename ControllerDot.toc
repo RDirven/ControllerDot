@@ -1,6 +1,6 @@
 ## Interface: 16001, 11507, 11506, 11505, 11504, 120000
 ## Title: Controller Dot Customizer
-## Notes: Pas het controller-vizier (GamepadReticle) aan: vorm, kleur, grootte, transparantie of helemaal uit. /dot
+## Notes: Customize or hide the controller reticle dot: shape, color, size, opacity, or off completely. /dot
 ## Author: Robert-Jan
 ## Version: @project-version@
 ## SavedVariables: ControllerDotDB

@@ -1,42 +1,60 @@
--- ControllerDot: pas het controller-vizier (GamepadReticle) aan of zet het helemaal uit.
--- Alleen GamepadReticle wordt aangeraakt (niet breed zoeken op "reticle": dat geeft lag).
--- Altijd SetAlpha i.p.v. Hide(), zodat het ook in gevechten werkt.
+-- ControllerDot: customize the controller reticle (GamepadReticle) or turn it off completely.
+-- Only GamepadReticle is touched (never match "reticle" broadly: that causes lag).
+-- Always SetAlpha instead of Hide(), so it also works in combat.
 
 local ADDON = "ControllerDot"
 
 local defaults = {
-	hidden = false,   -- hele vizier uit
-	alpha = 1,        -- transparantie van de stip (0-1)
+	hidden = false,   -- whole reticle off
+	alpha = 1,        -- dot transparency (0-1)
 	r = 1, g = 1, b = 1,
 	shape = "default",
 	size = 3,         -- pixels
-	thickness = 1,    -- lijndikte voor plus/kruis
-	swing = true,     -- swing-ring rond de stip tonen
+	thickness = 1,    -- line thickness for plus/cross
+	swing = true,     -- show the swing timer ring around the dot
 }
 
 local SHAPES = { "default", "square", "circle", "plus", "cross" }
 local SHAPE_NAMES = {
-	default = "Standaard",
-	square = "Vierkant",
-	circle = "Rond",
+	default = "Default",
+	square = "Square",
+	circle = "Circle",
 	plus = "Plus (+)",
-	cross = "Kruis (x)",
+	cross = "Cross (x)",
 }
 local CIRCLE_TEX = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+
+-- addons that also hide GamepadReticle and would make our settings invisible
+local CONFLICTS = { "NoDot" }
 
 local db
 local overlay, tex, bar1, bar2
 local hooked = false
 local origIconW, origIconH
-local busy = false -- voorkomt recursie in de hooks
+local busy = false -- prevents recursion in the hooks
 local weHidReticle, weHidSwing = false, false
 
 local function Print(msg)
 	print("|cff33ff99ControllerDot|r: " .. msg)
 end
 
+local function IsLoaded(name)
+	if C_AddOns and C_AddOns.IsAddOnLoaded then
+		return C_AddOns.IsAddOnLoaded(name)
+	end
+	return IsAddOnLoaded and IsAddOnLoaded(name)
+end
+
+local function LoadedConflicts()
+	local found = {}
+	for _, name in ipairs(CONFLICTS) do
+		if IsLoaded(name) then found[#found + 1] = name end
+	end
+	return found
+end
+
 ---------------------------------------------------------------------------
--- Toepassen
+-- Apply
 ---------------------------------------------------------------------------
 
 local function IconAlpha()
@@ -84,7 +102,7 @@ local function ApplyOverlay()
 		for i, bar in ipairs({ bar1, bar2 }) do
 			bar:SetColorTexture(db.r, db.g, db.b, 1)
 			if i == 1 then bar:SetSize(s, t) else bar:SetSize(t, s) end
-			bar:SetRotation(rot)
+			if bar.SetRotation then bar:SetRotation(rot) end
 			bar:Show()
 		end
 	end
@@ -113,7 +131,7 @@ local function Apply()
 					busy = true; self:SetAlpha(want); busy = false
 				end
 			end)
-			hooksecurefunc(icon, "SetVertexColor", function(self, r, g, b)
+			hooksecurefunc(icon, "SetVertexColor", function(self)
 				if busy then return end
 				busy = true; self:SetVertexColor(db.r, db.g, db.b); busy = false
 			end)
@@ -130,7 +148,7 @@ local function Apply()
 	end
 
 	busy = true
-	-- alleen terugzetten wat we zelf verborgen hebben; verder bepaalt de game de zichtbaarheid
+	-- only restore what we hid ourselves; otherwise the game decides visibility
 	if db.hidden then
 		reticle:SetAlpha(0); weHidReticle = true
 	elseif weHidReticle then
@@ -158,7 +176,7 @@ local function Apply()
 end
 
 ---------------------------------------------------------------------------
--- Instellingenvenster
+-- Settings window
 ---------------------------------------------------------------------------
 
 local panel
@@ -171,7 +189,7 @@ local function MakeSlider(parent, label, minV, maxV, step, key, fmt, y)
 	local s = CreateFrame("Slider", nil, parent)
 	s:SetOrientation("HORIZONTAL")
 	s:SetPoint("TOPLEFT", 16, y - 16)
-	s:SetSize(228, 16)
+	s:SetSize(248, 16)
 	s:SetMinMaxValues(minV, maxV)
 	s:SetValueStep(step)
 	if s.SetObeyStepOnDrag then s:SetObeyStepOnDrag(true) end
@@ -253,7 +271,7 @@ end
 
 local function BuildPanel()
 	panel = CreateFrame("Frame", "ControllerDotFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-	panel:SetSize(260, 340)
+	panel:SetSize(280, 370)
 	panel:SetPoint("CENTER")
 	panel:SetFrameStrata("DIALOG")
 	panel:SetMovable(true)
@@ -271,26 +289,26 @@ local function BuildPanel()
 		})
 		panel:SetBackdropColor(0.05, 0.05, 0.08, 0.92)
 	end
-	tinsert(UISpecialFrames, "ControllerDotFrame") -- sluiten met Escape
+	tinsert(UISpecialFrames, "ControllerDotFrame") -- close with Escape
 
 	local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
-	title:SetPoint("TOP", 0, -12)
+	title:SetPoint("TOPLEFT", 16, -12)
 	title:SetText("Controller Dot Customizer")
 
 	local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
 	close:SetPoint("TOPRIGHT", -2, -2)
 
-	widgets.hidden = MakeCheck(panel, "Vizier helemaal uit", "hidden", -38)
-	widgets.swing = MakeCheck(panel, "Swing-ring tonen", "swing", -64)
+	widgets.hidden = MakeCheck(panel, "Turn reticle off", "hidden", -38)
+	widgets.swing = MakeCheck(panel, "Show swing timer ring", "swing", -64)
 
-	-- vorm
+	-- shape
 	local shapeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
 	shapeLabel:SetPoint("TOPLEFT", 16, -100)
-	shapeLabel:SetText("Vorm")
+	shapeLabel:SetText("Shape")
 	local shapeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
 	shapeBtn:SetPoint("TOPLEFT", 14, -114)
 	shapeBtn:SetSize(130, 22)
-	shapeBtn:SetScript("OnClick", function(self, button)
+	shapeBtn:SetScript("OnClick", function(self)
 		local idx = 1
 		for i, s in ipairs(SHAPES) do if s == db.shape then idx = i end end
 		idx = (idx % #SHAPES) + 1
@@ -301,7 +319,7 @@ local function BuildPanel()
 	shapeBtn.Refresh = function(self) self:SetText(SHAPE_NAMES[db.shape] or db.shape) end
 	widgets.shape = shapeBtn
 
-	-- kleur
+	-- color
 	local swatch = CreateFrame("Button", nil, panel)
 	swatch:SetPoint("LEFT", shapeBtn, "RIGHT", 12, 0)
 	swatch:SetSize(22, 22)
@@ -313,19 +331,35 @@ local function BuildPanel()
 	fill:SetPoint("BOTTOMRIGHT", -2, 2)
 	local swLabel = swatch:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
 	swLabel:SetPoint("LEFT", swatch, "RIGHT", 6, 0)
-	swLabel:SetText("Kleur")
+	swLabel:SetText("Color")
 	swatch:SetScript("OnClick", OpenColorPicker)
 	swatch.Refresh = function() fill:SetColorTexture(db.r, db.g, db.b, 1) end
 	widgets.swatch = swatch
 
-	widgets.alpha = MakeSlider(panel, "Transparantie", 0, 1, 0.05, "alpha", "%.2f", -150)
-	widgets.size = MakeSlider(panel, "Grootte", 1, 40, 1, "size", "%d px", -192)
-	widgets.thickness = MakeSlider(panel, "Lijndikte (plus/kruis)", 1, 8, 1, "thickness", "%d px", -234)
+	widgets.alpha = MakeSlider(panel, "Opacity", 0, 1, 0.05, "alpha", "%.2f", -150)
+	widgets.size = MakeSlider(panel, "Size", 1, 40, 1, "size", "%d px", -192)
+	widgets.thickness = MakeSlider(panel, "Line thickness (plus/cross)", 1, 8, 1, "thickness", "%d px", -234)
+
+	-- warning when another addon also hides the reticle
+	local warn = panel:CreateFontString(nil, "ARTWORK", "GameFontRedSmall")
+	warn:SetPoint("TOPLEFT", 16, -276)
+	warn:SetPoint("RIGHT", -16, 0)
+	warn:SetJustifyH("LEFT")
+	warn.Refresh = function(self)
+		local found = LoadedConflicts()
+		if #found > 0 then
+			self:SetText(table.concat(found, ", ") .. " is also enabled and hides the reticle. Disable it, or these settings will have no visible effect.")
+			self:Show()
+		else
+			self:Hide()
+		end
+	end
+	widgets.warn = warn
 
 	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
 	reset:SetPoint("BOTTOM", 0, 14)
 	reset:SetSize(120, 22)
-	reset:SetText("Standaard")
+	reset:SetText("Defaults")
 	reset:SetScript("OnClick", function()
 		for k, v in pairs(defaults) do db[k] = v end
 		RefreshPanel()
@@ -342,28 +376,59 @@ local function TogglePanel()
 end
 
 ---------------------------------------------------------------------------
--- Slash-commando's
+-- Debug
+---------------------------------------------------------------------------
+
+local function Debug()
+	local r = GamepadReticle
+	Print("GamepadReticle: " .. (r and "found" or "NOT found"))
+	if r then
+		Print(string.format("  shown=%s visible=%s alpha=%.2f hooked=%s",
+			tostring(r:IsShown()), tostring(r:IsVisible()), r:GetAlpha(), tostring(hooked)))
+		local icon = r.Icons and r.Icons.StandardIcon
+		if icon then
+			local w, h = icon:GetSize()
+			Print(string.format("  StandardIcon: alpha=%.2f size=%.0fx%.0f", icon:GetAlpha(), w, h))
+		else
+			Print("  StandardIcon: NOT found")
+		end
+		Print("  SwingTimer: " .. (r.SwingTimer and "found" or "NOT found"))
+	end
+	Print(string.format("  settings: hidden=%s shape=%s alpha=%.2f size=%d",
+		tostring(db.hidden), db.shape, db.alpha, db.size))
+	local found = LoadedConflicts()
+	Print("  conflicting addons: " .. (#found > 0 and table.concat(found, ", ") or "none"))
+end
+
+---------------------------------------------------------------------------
+-- Slash commands
 ---------------------------------------------------------------------------
 
 SLASH_CONTROLLERDOT1 = "/dot"
 SLASH_CONTROLLERDOT2 = "/controllerdot"
 SlashCmdList.CONTROLLERDOT = function(msg)
 	msg = (msg or ""):lower():match("^%s*(.-)%s*$")
-	if msg == "off" or msg == "uit" then
+	if msg == "off" then
 		db.hidden = true
-	elseif msg == "on" or msg == "aan" then
+	elseif msg == "on" then
 		db.hidden = false
 	elseif msg == "toggle" then
 		db.hidden = not db.hidden
 	elseif msg == "reset" then
 		for k, v in pairs(defaults) do db[k] = v end
+	elseif msg == "debug" then
+		Debug()
+		return
+	elseif msg == "help" then
+		Print("/dot - open settings, /dot on|off|toggle, /dot reset, /dot debug")
+		return
 	else
 		TogglePanel()
 		return
 	end
 	Apply()
 	if panel and panel:IsShown() then RefreshPanel() end
-	Print(db.hidden and "vizier uit." or "vizier aan.")
+	Print(db.hidden and "reticle off." or "reticle on.")
 end
 
 ---------------------------------------------------------------------------
@@ -372,6 +437,7 @@ end
 
 local f = CreateFrame("Frame")
 f:RegisterEvent("ADDON_LOADED")
+f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
 pcall(f.RegisterEvent, f, "GAME_PAD_ACTIVE_CHANGED")
 f:SetScript("OnEvent", function(self, event, arg1)
@@ -385,7 +451,14 @@ f:SetScript("OnEvent", function(self, event, arg1)
 		end
 		return
 	end
+	if event == "PLAYER_LOGIN" then
+		local found = LoadedConflicts()
+		if #found > 0 then
+			Print("|cffff5555" .. table.concat(found, ", ") .. " is also enabled and hides the reticle. Disable it, or ControllerDot's settings will have no visible effect.|r")
+		end
+		return
+	end
 	Apply()
-	-- voor het geval het vizier iets later wordt aangemaakt
+	-- in case the reticle is created a bit later
 	C_Timer.After(2, Apply)
 end)

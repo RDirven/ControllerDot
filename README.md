@@ -19,12 +19,13 @@ This addon lets you style it your way, or turn it off completely.
 | Command | Effect |
 | --- | --- |
 | `/dot` | Open the settings window |
-| `/dot off` / `/dot uit` | Hide the reticle |
-| `/dot on` / `/dot aan` | Show the reticle |
+| `/dot off` | Hide the reticle |
+| `/dot on` | Show the reticle |
 | `/dot toggle` | Toggle the reticle |
 | `/dot reset` | Restore defaults |
+| `/dot debug` | Print reticle state (for bug reports) |
 
-The settings window is currently in Dutch.
+**Note:** do not run this together with other addons that hide the reticle (such as NoDot), or the settings will have no visible effect.
 
 ## License
 
