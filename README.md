@@ -7,7 +7,7 @@ This addon lets you style it your way, or turn it off completely.
 
 ## Features
 
-- Turn the reticle off completely
+- Turn the reticle off completely (hidden by default; use `/dot on` or the settings window to show it)
 - Shape: default, square, circle, plus (+), cross (x)
 - Color picker
 - Transparency, size and line thickness sliders

@@ -5,7 +5,7 @@
 local ADDON = "ControllerDot"
 
 local defaults = {
-	hidden = false,   -- whole reticle off
+	hidden = true,    -- whole reticle off (hidden by default)
 	alpha = 1,        -- dot transparency (0-1)
 	r = 1, g = 1, b = 1,
 	shape = "default",
