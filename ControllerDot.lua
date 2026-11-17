@@ -5,33 +5,56 @@
 local ADDON = "ControllerDot"
 
 local defaults = {
-	hidden = true,    -- whole reticle off (hidden by default)
-	alpha = 1,        -- dot transparency (0-1)
+	hidden = true,          -- master switch: whole reticle off (hidden by default)
+	showWhen = "always",    -- always | combat | outofcombat | target
+	colorByReaction = false, -- tint by hostile / neutral / friendly target
+	alpha = 1,              -- dot transparency (0-1)
 	r = 1, g = 1, b = 1,
 	shape = "default",
-	size = 3,         -- pixels
-	thickness = 1,    -- line thickness for plus/cross
+	size = 3,               -- pixels
+	thickness = 1,          -- line thickness for plus/cross/crosshair
+	outline = 0,            -- black outline thickness in pixels (0 = off, custom shapes only)
 }
 
-local SHAPES = { "default", "square", "circle", "plus", "cross" }
+local SHAPES = { "default", "square", "diamond", "circle", "plus", "cross", "crosshair" }
 local SHAPE_NAMES = {
 	default = "Default",
 	square = "Square",
+	diamond = "Diamond",
 	circle = "Circle",
 	plus = "Plus (+)",
 	cross = "Cross (x)",
+	crosshair = "Crosshair",
 }
 local CIRCLE_TEX = "Interface\\CharacterFrame\\TempPortraitAlphaMask"
+
+local SHOW_WHEN = { "always", "combat", "outofcombat", "target" }
+local SHOW_WHEN_NAMES = {
+	always = "Always",
+	combat = "Only in combat",
+	outofcombat = "Only out of combat",
+	target = "Only with a target",
+}
+
+-- colors used when "color by target" is on
+local COLOR_HOSTILE = { 1, 0.2, 0.2 }
+local COLOR_NEUTRAL = { 1, 0.9, 0.2 }
+local COLOR_FRIENDLY = { 0.2, 1, 0.2 }
+-- units that can be the reticle's target (soft targets do not exist on every client)
+local TARGET_UNITS = { "target", "softenemy", "softfriend" }
 
 -- addons that also hide GamepadReticle and would make our settings invisible
 local CONFLICTS = { "NoDot" }
 
 local db
-local overlay, tex, bar1, bar2
+local overlay
+local parts = {}           -- up to 4 { edge, fill } texture pairs that make up the custom shape
 local hooked = false
 local origIconW, origIconH
-local busy = false -- prevents recursion in the hooks
+local busy = false         -- prevents recursion in the hooks
 local weHidReticle = false
+local lastGameAlpha        -- last alpha the game asked for, so we can restore it
+local inCombat = false
 
 local function Print(msg)
 	print("|cff33ff99ControllerDot|r: " .. msg)
@@ -53,6 +76,54 @@ local function LoadedConflicts()
 end
 
 ---------------------------------------------------------------------------
+-- Visibility and color rules
+---------------------------------------------------------------------------
+
+local function HasTarget()
+	for _, unit in ipairs(TARGET_UNITS) do
+		if UnitExists(unit) then return true end
+	end
+	return false
+end
+
+-- true when the reticle must be invisible right now
+local function ShouldHide()
+	if db.hidden then return true end
+	local w = db.showWhen
+	if w == "combat" then
+		return not inCombat
+	elseif w == "outofcombat" then
+		return inCombat
+	elseif w == "target" then
+		return not HasTarget()
+	end
+	return false
+end
+
+-- base color, or a reaction color when the reticle has a target
+local function CurrentColor()
+	if db.colorByReaction then
+		for _, unit in ipairs(TARGET_UNITS) do
+			if UnitExists(unit) then
+				local reaction = UnitReaction("player", unit)
+				if reaction then
+					local c
+					if reaction <= 3 then
+						c = COLOR_HOSTILE
+					elseif reaction == 4 then
+						c = COLOR_NEUTRAL
+					else
+						c = COLOR_FRIENDLY
+					end
+					return c[1], c[2], c[3]
+				end
+			end
+		end
+	end
+	return db.r, db.g, db.b
+end
+
+---------------------------------------------------------------------------
 -- Apply
 ---------------------------------------------------------------------------
 
@@ -67,42 +138,72 @@ local function BuildOverlay(reticle)
 	overlay:SetSize(1, 1)
 	overlay:SetFrameLevel(reticle:GetFrameLevel() + 5)
 
-	tex = overlay:CreateTexture(nil, "OVERLAY")
-	tex:SetPoint("CENTER")
-	bar1 = overlay:CreateTexture(nil, "OVERLAY")
-	bar1:SetPoint("CENTER")
-	bar2 = overlay:CreateTexture(nil, "OVERLAY")
-	bar2:SetPoint("CENTER")
+	-- edges are drawn below all fills (sublevel 0 vs 1) so outlines never cover the shape
+	for i = 1, 4 do
+		parts[i] = {
+			edge = overlay:CreateTexture(nil, "OVERLAY", nil, 0),
+			fill = overlay:CreateTexture(nil, "OVERLAY", nil, 1),
+		}
+	end
+end
+
+-- geometry of a shape: a list of { w, h, x, y, rot (degrees), circle }
+local function ShapeParts(shape, s, t)
+	if shape == "square" then
+		return { { w = s, h = s } }
+	elseif shape == "diamond" then
+		return { { w = s, h = s, rot = 45 } }
+	elseif shape == "circle" then
+		return { { w = s, h = s, circle = true } }
+	elseif shape == "plus" or shape == "cross" then
+		local rot = (shape == "cross") and 45 or 0
+		return { { w = s, h = t, rot = rot }, { w = t, h = s, rot = rot } }
+	elseif shape == "crosshair" then
+		local gap = math.max(1, math.floor(s / 4))
+		local len = math.max(1, (s - 2 * gap) / 2)
+		local off = gap + len / 2
+		return {
+			{ w = len, h = t, x = -off },
+			{ w = len, h = t, x = off },
+			{ w = t, h = len, y = off },
+			{ w = t, h = len, y = -off },
+		}
+	end
+	return {}
+end
+
+local function StyleTexture(texture, spec, grow, r, g, b)
+	texture:ClearAllPoints()
+	texture:SetPoint("CENTER", overlay, "CENTER", spec.x or 0, spec.y or 0)
+	texture:SetSize(spec.w + grow, spec.h + grow)
+	if spec.circle then
+		texture:SetTexture(CIRCLE_TEX)
+		texture:SetVertexColor(r, g, b)
+	else
+		texture:SetColorTexture(r, g, b, 1)
+	end
+	if texture.SetRotation then texture:SetRotation(math.rad(spec.rot or 0)) end
+	texture:Show()
 end
 
 local function ApplyOverlay()
-	local s, t = db.size, db.thickness
-	local shape = db.shape
-
-	tex:Hide(); bar1:Hide(); bar2:Hide()
-	if shape == "default" then
+	for _, p in ipairs(parts) do
+		p.fill:Hide(); p.edge:Hide()
+	end
+	if db.shape == "default" then
 		overlay:Hide()
 		return
 	end
 	overlay:Show()
 	overlay:SetAlpha(db.alpha)
 
-	if shape == "square" or shape == "circle" then
-		if shape == "square" then
-			tex:SetColorTexture(1, 1, 1, 1)
-		else
-			tex:SetTexture(CIRCLE_TEX)
-		end
-		tex:SetVertexColor(db.r, db.g, db.b)
-		tex:SetSize(s, s)
-		tex:Show()
-	else
-		local rot = (shape == "cross") and math.rad(45) or 0
-		for i, bar in ipairs({ bar1, bar2 }) do
-			bar:SetColorTexture(db.r, db.g, db.b, 1)
-			if i == 1 then bar:SetSize(s, t) else bar:SetSize(t, s) end
-			if bar.SetRotation then bar:SetRotation(rot) end
-			bar:Show()
+	local r, g, b = CurrentColor()
+	local grow = db.outline * 2
+	for i, spec in ipairs(ShapeParts(db.shape, db.size, db.thickness)) do
+		local p = parts[i]
+		StyleTexture(p.fill, spec, 0, r, g, b)
+		if db.outline > 0 then
+			StyleTexture(p.edge, spec, grow, 0, 0, 0)
 		end
 	end
 end
@@ -114,9 +215,11 @@ local function Apply()
 
 	if not hooked then
 		hooked = true
+		lastGameAlpha = reticle:GetAlpha()
 		hooksecurefunc(reticle, "SetAlpha", function(self, a)
-			if busy or not db.hidden then return end
-			if a and a > 0 then
+			if busy then return end
+			lastGameAlpha = a
+			if a and a > 0 and ShouldHide() then
 				busy = true; self:SetAlpha(0); busy = false
 			end
 		end)
@@ -131,7 +234,7 @@ local function Apply()
 			end)
 			hooksecurefunc(icon, "SetVertexColor", function(self)
 				if busy then return end
-				busy = true; self:SetVertexColor(db.r, db.g, db.b); busy = false
+				busy = true; self:SetVertexColor(CurrentColor()); busy = false
 			end)
 		end
 		BuildOverlay(reticle)
@@ -139,14 +242,14 @@ local function Apply()
 
 	busy = true
 	-- only restore what we hid ourselves; otherwise the game decides visibility
-	if db.hidden then
+	if ShouldHide() then
 		reticle:SetAlpha(0); weHidReticle = true
 	elseif weHidReticle then
-		reticle:SetAlpha(1); weHidReticle = false
+		reticle:SetAlpha(lastGameAlpha or 1); weHidReticle = false
 	end
 	if icon then
 		icon:SetAlpha(IconAlpha())
-		icon:SetVertexColor(db.r, db.g, db.b)
+		icon:SetVertexColor(CurrentColor())
 		if db.shape == "default" then
 			icon:SetSize(db.size, db.size)
 		elseif origIconW then
@@ -158,12 +261,28 @@ local function Apply()
 	ApplyOverlay()
 end
 
+-- restore all styling; the master "reticle off" switch is left as the user set it
+local function ResetSettings()
+	for k, v in pairs(defaults) do
+		if k ~= "hidden" then db[k] = v end
+	end
+end
+
 ---------------------------------------------------------------------------
--- Settings window
+-- Settings UI (shared by the small /dot window and the Blizzard options page)
 ---------------------------------------------------------------------------
 
 local panel
-local widgets = {}
+local sets = {}          -- one widget set per UI that was built
+local refreshing = false -- true while widgets are being synced from the db
+
+local function RefreshAll()
+	refreshing = true
+	for _, set in ipairs(sets) do
+		for _, w in pairs(set) do w:Refresh() end
+	end
+	refreshing = false
+end
 
 local function MakeSlider(parent, label, minV, maxV, step, key, fmt, y)
 	local fs = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
@@ -188,9 +307,11 @@ local function MakeSlider(parent, label, minV, maxV, step, key, fmt, y)
 		fs:SetText(label .. ": " .. string.format(fmt, v))
 	end
 	s:SetScript("OnValueChanged", function(self, v)
-		v = math.floor(v / step + 0.5) * step
-		db[key] = v
+		-- round to the step and drop floating point noise (0.15000000000000002)
+		v = tonumber(string.format("%.4f", math.floor(v / step + 0.5) * step))
 		UpdateLabel(v)
+		if refreshing then return end
+		db[key] = v
 		Apply()
 	end)
 	s:SetScript("OnMouseWheel", function(self, d)
@@ -218,16 +339,43 @@ local function MakeCheck(parent, label, key, y)
 	return c
 end
 
+-- button that cycles through a list of values (left-click next, right-click previous)
+local function MakeCycle(parent, key, list, names, x, y, width)
+	local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+	b:SetPoint("TOPLEFT", x, y)
+	b:SetSize(width, 22)
+	b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	b:SetScript("OnClick", function(self, button)
+		local idx = 1
+		for i, v in ipairs(list) do
+			if v == db[key] then idx = i end
+		end
+		idx = idx + (button == "RightButton" and -1 or 1)
+		if idx < 1 then idx = #list elseif idx > #list then idx = 1 end
+		db[key] = list[idx]
+		self:Refresh()
+		Apply()
+	end)
+	b:SetScript("OnEnter", function(self)
+		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+		GameTooltip:SetText("Left-click: next, right-click: previous")
+		GameTooltip:Show()
+	end)
+	b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	b.Refresh = function(self) self:SetText(names[db[key]] or db[key]) end
+	return b
+end
+
 local function OpenColorPicker()
 	local oldR, oldG, oldB = db.r, db.g, db.b
 	local function OnChange()
 		db.r, db.g, db.b = ColorPickerFrame:GetColorRGB()
-		widgets.swatch:Refresh()
+		RefreshAll()
 		Apply()
 	end
 	local function OnCancel()
 		db.r, db.g, db.b = oldR, oldG, oldB
-		widgets.swatch:Refresh()
+		RefreshAll()
 		Apply()
 	end
 	if ColorPickerFrame.SetupColorPickerAndShow then
@@ -248,13 +396,80 @@ local function OpenColorPicker()
 	end
 end
 
-local function RefreshPanel()
-	for _, w in pairs(widgets) do w:Refresh() end
+-- fills `parent` with all controls; y0 is the y offset of the first row
+local function BuildContent(parent, y0)
+	local w = {}
+	sets[#sets + 1] = w
+
+	w.hidden = MakeCheck(parent, "Turn reticle off", "hidden", y0)
+
+	-- shape + color
+	local shapeLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+	shapeLabel:SetPoint("TOPLEFT", 16, y0 - 36)
+	shapeLabel:SetText("Shape")
+	w.shape = MakeCycle(parent, "shape", SHAPES, SHAPE_NAMES, 14, y0 - 50, 130)
+
+	local swatch = CreateFrame("Button", nil, parent)
+	swatch:SetPoint("LEFT", w.shape, "RIGHT", 12, 0)
+	swatch:SetSize(22, 22)
+	local border = swatch:CreateTexture(nil, "BACKGROUND")
+	border:SetAllPoints()
+	border:SetColorTexture(0.6, 0.6, 0.6, 1)
+	local fill = swatch:CreateTexture(nil, "ARTWORK")
+	fill:SetPoint("TOPLEFT", 2, -2)
+	fill:SetPoint("BOTTOMRIGHT", -2, 2)
+	local swLabel = swatch:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	swLabel:SetPoint("LEFT", swatch, "RIGHT", 6, 0)
+	swLabel:SetText("Color")
+	swatch:SetScript("OnClick", OpenColorPicker)
+	swatch.Refresh = function() fill:SetColorTexture(db.r, db.g, db.b, 1) end
+	w.swatch = swatch
+
+	-- visibility rules
+	local whenLabel = parent:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
+	whenLabel:SetPoint("TOPLEFT", 16, y0 - 80)
+	whenLabel:SetText("Show when (only applies if the reticle is not turned off)")
+	w.showWhen = MakeCycle(parent, "showWhen", SHOW_WHEN, SHOW_WHEN_NAMES, 14, y0 - 94, 190)
+	w.colorByReaction = MakeCheck(parent, "Color by target (hostile / neutral / friendly)", "colorByReaction", y0 - 124)
+
+	w.alpha = MakeSlider(parent, "Opacity", 0, 1, 0.05, "alpha", "%.2f", y0 - 158)
+	w.size = MakeSlider(parent, "Size", 1, 40, 1, "size", "%d px", y0 - 200)
+	w.thickness = MakeSlider(parent, "Line thickness (plus/cross/crosshair)", 1, 8, 1, "thickness", "%d px", y0 - 242)
+	w.outline = MakeSlider(parent, "Outline (not for Default shape)", 0, 4, 1, "outline", "%d px", y0 - 284)
+
+	-- warning when another addon also hides the reticle
+	local warn = parent:CreateFontString(nil, "ARTWORK", "GameFontRedSmall")
+	warn:SetPoint("TOPLEFT", 16, y0 - 326)
+	warn:SetWidth(248)
+	warn:SetJustifyH("LEFT")
+	warn.Refresh = function(self)
+		local found = LoadedConflicts()
+		if #found > 0 then
+			self:SetText(table.concat(found, ", ") .. " is also enabled and hides the reticle. Disable it, or these settings will have no visible effect.")
+			self:Show()
+		else
+			self:Hide()
+		end
+	end
+	w.warn = warn
+
+	local reset = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+	reset:SetPoint("TOPLEFT", 16, y0 - 372)
+	reset:SetSize(120, 22)
+	reset:SetText("Defaults")
+	reset:SetScript("OnClick", function()
+		ResetSettings()
+		RefreshAll()
+		Apply()
+	end)
+
+	return w
 end
 
+-- small movable window (/dot): leaves the screen center free so you can see the reticle
 local function BuildPanel()
 	panel = CreateFrame("Frame", "ControllerDotFrame", UIParent, BackdropTemplateMixin and "BackdropTemplate" or nil)
-	panel:SetSize(280, 344)
+	panel:SetSize(280, 444)
 	panel:SetPoint("CENTER")
 	panel:SetFrameStrata("DIALOG")
 	panel:SetMovable(true)
@@ -281,80 +496,56 @@ local function BuildPanel()
 	local close = CreateFrame("Button", nil, panel, "UIPanelCloseButton")
 	close:SetPoint("TOPRIGHT", -2, -2)
 
-	widgets.hidden = MakeCheck(panel, "Turn reticle off", "hidden", -38)
+	BuildContent(panel, -38)
 
-	-- shape
-	local shapeLabel = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalSmall")
-	shapeLabel:SetPoint("TOPLEFT", 16, -74)
-	shapeLabel:SetText("Shape")
-	local shapeBtn = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	shapeBtn:SetPoint("TOPLEFT", 14, -88)
-	shapeBtn:SetSize(130, 22)
-	shapeBtn:SetScript("OnClick", function(self)
-		local idx = 1
-		for i, s in ipairs(SHAPES) do if s == db.shape then idx = i end end
-		idx = (idx % #SHAPES) + 1
-		db.shape = SHAPES[idx]
-		self:Refresh()
-		Apply()
-	end)
-	shapeBtn.Refresh = function(self) self:SetText(SHAPE_NAMES[db.shape] or db.shape) end
-	widgets.shape = shapeBtn
-
-	-- color
-	local swatch = CreateFrame("Button", nil, panel)
-	swatch:SetPoint("LEFT", shapeBtn, "RIGHT", 12, 0)
-	swatch:SetSize(22, 22)
-	local border = swatch:CreateTexture(nil, "BACKGROUND")
-	border:SetAllPoints()
-	border:SetColorTexture(0.6, 0.6, 0.6, 1)
-	local fill = swatch:CreateTexture(nil, "ARTWORK")
-	fill:SetPoint("TOPLEFT", 2, -2)
-	fill:SetPoint("BOTTOMRIGHT", -2, 2)
-	local swLabel = swatch:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
-	swLabel:SetPoint("LEFT", swatch, "RIGHT", 6, 0)
-	swLabel:SetText("Color")
-	swatch:SetScript("OnClick", OpenColorPicker)
-	swatch.Refresh = function() fill:SetColorTexture(db.r, db.g, db.b, 1) end
-	widgets.swatch = swatch
-
-	widgets.alpha = MakeSlider(panel, "Opacity", 0, 1, 0.05, "alpha", "%.2f", -124)
-	widgets.size = MakeSlider(panel, "Size", 1, 40, 1, "size", "%d px", -166)
-	widgets.thickness = MakeSlider(panel, "Line thickness (plus/cross)", 1, 8, 1, "thickness", "%d px", -208)
-
-	-- warning when another addon also hides the reticle
-	local warn = panel:CreateFontString(nil, "ARTWORK", "GameFontRedSmall")
-	warn:SetPoint("TOPLEFT", 16, -250)
-	warn:SetPoint("RIGHT", -16, 0)
-	warn:SetJustifyH("LEFT")
-	warn.Refresh = function(self)
-		local found = LoadedConflicts()
-		if #found > 0 then
-			self:SetText(table.concat(found, ", ") .. " is also enabled and hides the reticle. Disable it, or these settings will have no visible effect.")
-			self:Show()
-		else
-			self:Hide()
-		end
-	end
-	widgets.warn = warn
-
-	local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-	reset:SetPoint("BOTTOM", 0, 14)
-	reset:SetSize(120, 22)
-	reset:SetText("Defaults")
-	reset:SetScript("OnClick", function()
-		for k, v in pairs(defaults) do db[k] = v end
-		RefreshPanel()
-		Apply()
-	end)
-
-	panel:SetScript("OnShow", RefreshPanel)
+	panel:SetScript("OnShow", RefreshAll)
 	panel:Hide()
 end
 
 local function TogglePanel()
 	if not panel then BuildPanel() end
 	panel:SetShown(not panel:IsShown())
+end
+
+-- page in the Blizzard options window (Options > AddOns)
+local optionsFrame, category
+
+local function BuildOptions()
+	optionsFrame = CreateFrame("Frame")
+	optionsFrame.name = "Controller Dot"
+
+	local title = optionsFrame:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+	title:SetPoint("TOPLEFT", 16, -16)
+	title:SetText("Controller Dot Customizer")
+
+	local hint = optionsFrame:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+	hint:SetPoint("TOPLEFT", 16, -42)
+	hint:SetWidth(420)
+	hint:SetJustifyH("LEFT")
+	hint:SetText("The options window covers the center of the screen. Type /dot for a small movable window if you want to see the reticle while you edit.")
+
+	BuildContent(optionsFrame, -84)
+	optionsFrame:SetScript("OnShow", RefreshAll)
+
+	pcall(function()
+		if Settings and Settings.RegisterCanvasLayoutCategory then
+			category = Settings.RegisterCanvasLayoutCategory(optionsFrame, optionsFrame.name)
+			Settings.RegisterAddOnCategory(category)
+		elseif InterfaceOptions_AddCategory then
+			InterfaceOptions_AddCategory(optionsFrame)
+		end
+	end)
+end
+
+local function OpenOptions()
+	if category and Settings and Settings.OpenToCategory then
+		Settings.OpenToCategory(category.GetID and category:GetID() or category.ID)
+	elseif optionsFrame and InterfaceOptionsFrame_OpenToCategory then
+		InterfaceOptionsFrame_OpenToCategory(optionsFrame)
+		InterfaceOptionsFrame_OpenToCategory(optionsFrame)
+	else
+		TogglePanel()
+	end
 end
 
 ---------------------------------------------------------------------------
@@ -395,8 +586,10 @@ local function Debug()
 		end
 		Dump(r, "R", 1)
 	end
-	P(string.format("  settings: hidden=%s shape=%s alpha=%.2f size=%d",
-		tostring(db.hidden), db.shape, db.alpha, db.size))
+	P(string.format("  settings: hidden=%s showWhen=%s colorByReaction=%s shape=%s alpha=%.2f size=%d outline=%d",
+		tostring(db.hidden), db.showWhen, tostring(db.colorByReaction), db.shape, db.alpha, db.size, db.outline))
+	P(string.format("  state: inCombat=%s hasTarget=%s shouldHide=%s",
+		tostring(inCombat), tostring(HasTarget()), tostring(ShouldHide())))
 	local found = LoadedConflicts()
 	P("  conflicting addons: " .. (#found > 0 and table.concat(found, ", ") or "none"))
 	db.lastDebug = log
@@ -411,27 +604,48 @@ SLASH_CONTROLLERDOT1 = "/dot"
 SLASH_CONTROLLERDOT2 = "/controllerdot"
 SlashCmdList.CONTROLLERDOT = function(msg)
 	msg = (msg or ""):lower():match("^%s*(.-)%s*$")
-	if msg == "off" then
+	local cmd, arg = msg:match("^(%S*)%s*(.-)$")
+	local say
+
+	if cmd == "off" then
 		db.hidden = true
-	elseif msg == "on" then
+		say = "reticle off."
+	elseif cmd == "on" then
 		db.hidden = false
-	elseif msg == "toggle" then
+		say = "reticle on."
+	elseif cmd == "toggle" then
 		db.hidden = not db.hidden
-	elseif msg == "reset" then
-		for k, v in pairs(defaults) do db[k] = v end
-	elseif msg == "debug" then
+		say = db.hidden and "reticle off." or "reticle on."
+	elseif cmd == "reset" then
+		ResetSettings()
+		say = "settings reset (reticle stays " .. (db.hidden and "off" or "on") .. ")."
+	elseif cmd == "show" then
+		if SHOW_WHEN_NAMES[arg] then
+			db.showWhen = arg
+			say = "show when: " .. SHOW_WHEN_NAMES[arg]:lower() .. "."
+		else
+			Print("current: " .. (SHOW_WHEN_NAMES[db.showWhen] or db.showWhen)
+				.. ". Usage: /dot show " .. table.concat(SHOW_WHEN, "|"))
+			return
+		end
+	elseif cmd == "debug" then
 		Debug()
 		return
-	elseif msg == "help" then
-		Print("/dot - open settings, /dot on|off|toggle, /dot reset, /dot debug")
+	elseif cmd == "options" then
+		OpenOptions()
+		return
+	elseif cmd == "help" then
+		Print("/dot - small settings window, /dot options - Blizzard options page")
+		Print("/dot on|off|toggle, /dot show " .. table.concat(SHOW_WHEN, "|") .. ", /dot reset, /dot debug")
 		return
 	else
 		TogglePanel()
 		return
 	end
+
 	Apply()
-	if panel and panel:IsShown() then RefreshPanel() end
-	Print(db.hidden and "reticle off." or "reticle on.")
+	RefreshAll()
+	Print(say)
 end
 
 ---------------------------------------------------------------------------
@@ -442,7 +656,13 @@ local f = CreateFrame("Frame")
 f:RegisterEvent("ADDON_LOADED")
 f:RegisterEvent("PLAYER_LOGIN")
 f:RegisterEvent("PLAYER_ENTERING_WORLD")
-pcall(f.RegisterEvent, f, "GAME_PAD_ACTIVE_CHANGED")
+f:RegisterEvent("PLAYER_REGEN_DISABLED")
+f:RegisterEvent("PLAYER_REGEN_ENABLED")
+f:RegisterEvent("PLAYER_TARGET_CHANGED")
+-- not present on every client
+for _, ev in ipairs({ "GAME_PAD_ACTIVE_CHANGED", "PLAYER_SOFT_ENEMY_CHANGED", "PLAYER_SOFT_FRIEND_CHANGED" }) do
+	pcall(f.RegisterEvent, f, ev)
+end
 f:SetScript("OnEvent", function(self, event, arg1)
 	if event == "ADDON_LOADED" then
 		if arg1 == ADDON then
@@ -451,17 +671,30 @@ f:SetScript("OnEvent", function(self, event, arg1)
 			for k, v in pairs(defaults) do
 				if db[k] == nil then db[k] = v end
 			end
+			BuildOptions()
 		end
 		return
 	end
+	if not db then return end
+
 	if event == "PLAYER_LOGIN" then
 		local found = LoadedConflicts()
 		if #found > 0 then
 			Print("|cffff5555" .. table.concat(found, ", ") .. " is also enabled and hides the reticle. Disable it, or ControllerDot's settings will have no visible effect.|r")
 		end
-		return
+	elseif event == "PLAYER_REGEN_DISABLED" then
+		inCombat = true
+		Apply()
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		inCombat = false
+		Apply()
+	elseif event == "PLAYER_TARGET_CHANGED" or event:find("^PLAYER_SOFT_") then
+		if db.colorByReaction or db.showWhen == "target" then Apply() end
+	else
+		-- PLAYER_ENTERING_WORLD, GAME_PAD_ACTIVE_CHANGED
+		inCombat = UnitAffectingCombat("player") and true or false
+		Apply()
+		-- in case the reticle is created a bit later
+		C_Timer.After(2, Apply)
 	end
-	Apply()
-	-- in case the reticle is created a bit later
-	C_Timer.After(2, Apply)
 end)
